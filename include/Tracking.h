@@ -53,6 +53,15 @@ class LoopClosing;
 class System;
 class Settings;
 
+struct LostInfo
+{
+    int mapIdPrev;
+    int frameIdPrev;
+    int mapIdNext;
+    int frameIdNext;
+    Sophus::SE3f T21;
+};
+
 class Tracking
 {  
 
@@ -368,6 +377,14 @@ protected:
 
 public:
     cv::Mat mImRight;
+
+    //------------- NEW -------------
+public:
+    std::vector<Frame> mvInitialFrames;
+    std::vector<LostInfo> mvLostInfos;
+    bool mbReInitialization; // false for the first initialization, true for reinitialization
+public:
+    void MonocularInitializationNew();
 };
 
 } //namespace ORB_SLAM

@@ -25,6 +25,9 @@
 
 #include<thread>
 
+#include "Lost.h"
+#include <ceres/ceres.h>
+#include <ceres/autodiff_cost_function.h>
 
 using namespace std;
 namespace ORB_SLAM3
@@ -39,7 +42,7 @@ namespace ORB_SLAM3
     }
 
     bool TwoViewReconstruction::Reconstruct(const std::vector<cv::KeyPoint>& vKeys1, const std::vector<cv::KeyPoint>& vKeys2, const vector<int> &vMatches12,
-                                             Sophus::SE3f &T21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated)
+                                             Sophus::SE3f &T21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated, vector<bool> &vbMatchesInlier)
     {
         mvKeys1.clear();
         mvKeys2.clear();
@@ -118,13 +121,29 @@ namespace ORB_SLAM3
         // Try to reconstruct from homography or fundamental depending on the ratio (0.40-0.45)
         if(RH>0.50) // if(RH>0.40)
         {
-            //cout << "Initialization from Homography" << endl;
-            return ReconstructH(vbMatchesInliersH,H, mK,T21,vP3D,vbTriangulated,minParallax,50);
+            cout << "Initialization from Homography" << endl;
+            bool success = ReconstructH(vbMatchesInliersH,H, mK,T21,vP3D,vbTriangulated,minParallax,50);
+            vbMatchesInlier = std::move(vbMatchesInliersH);
+            if (success)
+            {
+                std::cout << "init success\n";
+            }
+            else
+                std::cout << "init fail\n";
+            return success;
         }
         else //if(pF_HF>0.6)
         {
-            //cout << "Initialization from Fundamental" << endl;
-            return ReconstructF(vbMatchesInliersF,F,mK,T21,vP3D,vbTriangulated,minParallax,50);
+            cout << "Initialization from Fundamental" << endl;
+            bool success = ReconstructF(vbMatchesInliersF,F,mK,T21,vP3D,vbTriangulated,minParallax,50);
+            vbMatchesInlier = std::move(vbMatchesInliersF);
+            if (success)
+            {
+                std::cout << "init success\n";
+            }
+            else
+                std::cout << "init fail\n";
+            return success;
         }
     }
 
@@ -516,6 +535,13 @@ namespace ORB_SLAM3
         if(nGood4>0.7*maxGood)
             nsimilar++;
 
+        std::cout << "maxGood:" << maxGood << std::endl;
+        std::cout << "nMinGood:" << nMinGood << std::endl;
+        std::cout << "nGood:" << nGood1 << "," << nGood2 <<","
+                  << nGood3 << "," << nGood4 << std::endl;
+        std::cout << "parallax:" << parallax1 << "," << parallax2 <<","
+                  << parallax3 << "," << parallax4 << std::endl;
+
         // If there is not a clear winner or not enough triangulated points reject initialization
         if(maxGood<nMinGood || nsimilar>1)
         {
@@ -525,6 +551,13 @@ namespace ORB_SLAM3
         // If best reconstruction has enough parallax initialize
         if(maxGood==nGood1)
         {
+            std::cout << "choose 1\n";
+            Eigen::AngleAxisf r(R1);
+            std::cout << "rotation_matrix:" << R1 << std::endl;
+            std::cout << "euler angle:" << R1.eulerAngles(0, 1, 2).transpose() << std::endl;
+            std::cout << "axis:" <<r.axis().transpose() << ", angle:" << r.angle() << std::endl;
+            std::cout << "t:" << t1.transpose() << std::endl;
+            T21 = Sophus::SE3f(R1, t1);
             if(parallax1>minParallax)
             {
                 vP3D = vP3D1;
@@ -535,6 +568,13 @@ namespace ORB_SLAM3
             }
         }else if(maxGood==nGood2)
         {
+            std::cout << "choose 2\n";
+            Eigen::AngleAxisf r(R2);
+            std::cout << "rotation_matrix:" << R2 << std::endl;
+            std::cout << "euler angle:" << R2.eulerAngles(0, 1, 2).transpose() << std::endl;
+            std::cout << "axis:" <<r.axis().transpose() << ", angle:" << r.angle() << std::endl;
+            std::cout << "t:" << t1.transpose() << std::endl;
+            T21 = Sophus::SE3f(R2, t1);
             if(parallax2>minParallax)
             {
                 vP3D = vP3D2;
@@ -545,6 +585,13 @@ namespace ORB_SLAM3
             }
         }else if(maxGood==nGood3)
         {
+            std::cout << "choose 3\n";
+            Eigen::AngleAxisf r(R1);
+            std::cout << "rotation_matrix:" << R1 << std::endl;
+            std::cout << "euler angle:" << R1.eulerAngles(0, 1, 2).transpose() << std::endl;
+            std::cout << "axis:" <<r.axis().transpose() << ", angle:" << r.angle() << std::endl;
+            std::cout << "t:" << t2.transpose() << std::endl;
+            T21 = Sophus::SE3f(R1, t2);
             if(parallax3>minParallax)
             {
                 vP3D = vP3D3;
@@ -555,6 +602,13 @@ namespace ORB_SLAM3
             }
         }else if(maxGood==nGood4)
         {
+            std::cout << "choose 4\n";
+            Eigen::AngleAxisf r(R2);
+            std::cout << "rotation_matrix:" << R2 << std::endl;
+            std::cout << "euler angle:" << R2.eulerAngles(0, 1, 2).transpose() << std::endl;
+            std::cout << "axis:" <<r.axis().transpose() << ", angle:" << r.angle() << std::endl;
+            std::cout << "t:" << t2.transpose() << std::endl;
+            T21 = Sophus::SE3f(R2, t2);
             if(parallax4>minParallax)
             {
                 vP3D = vP3D4;

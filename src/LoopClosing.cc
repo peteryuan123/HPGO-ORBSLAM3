@@ -135,6 +135,12 @@ void LoopClosing::Run()
                         g2o::Sim3 gSw2c = mg2oMergeSlw.inverse();
                         g2o::Sim3 gSw1m = mg2oMergeSlw;
 
+                        std::cout << "mg2oMergeRlw:" << mg2oMergeSlw.rotation().toRotationMatrix() << std::endl;
+                        std::cout << "mg2oMergetlw:" << mg2oMergeSlw.translation() << std::endl;
+                        std::cout << "mg2oMergeSlw:" << mg2oMergeSlw.scale() << std::endl;
+                        std::cout << "mpCurrentKF stamp" << mpCurrentKF->mTimeStamp << std::endl;
+                        std::cout << "mpMergeMatchedKF stamp" << mpMergeMatchedKF->mTimeStamp << std::endl;
+
                         mSold_new = (gSw2c * gScw1);
 
 
@@ -167,6 +173,35 @@ void LoopClosing::Run()
 
                         mg2oMergeScw = mg2oMergeSlw;
 
+                        // test
+                        ofstream f;
+                        f.open("AllKeyF.txt");
+                        f << fixed;
+
+                        vector<Map*> vpMaps = mpAtlas->GetAllMaps();
+                        int numMaxKFs = 0;
+                        for(Map* pMap :vpMaps)
+                        {
+                            vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
+                            sort(vpKFs.begin(),vpKFs.end(),KeyFrame::lId);
+
+                            for(size_t i=0; i<vpKFs.size(); i++)
+                            {
+                                KeyFrame* pKF = vpKFs[i];
+                                // pKF->SetPose(pKF->GetPose()*Two);
+
+                                if(!pKF || pKF->isBad())
+                                    continue;
+
+                                Sophus::SE3f Twc = pKF->GetPoseInverse();
+                                Eigen::Quaternionf q = Twc.unit_quaternion();
+                                Eigen::Vector3f t = Twc.translation();
+                                f << setprecision(6) << pKF->mTimeStamp << " " <<  setprecision(9) << t(0) << " " << t(1) << " " << t(2) << " " << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << endl;
+                            }
+                        }
+                        f.close();
+
+                        exit(0);
                         //mpTracker->SetStepByStep(true);
 
                         Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
@@ -180,7 +215,9 @@ void LoopClosing::Run()
                         if (mpTracker->mSensor==System::IMU_MONOCULAR ||mpTracker->mSensor==System::IMU_STEREO || mpTracker->mSensor==System::IMU_RGBD)
                             MergeLocal2();
                         else
-                            MergeLocal();
+                        {
+//                            MergeLocal();
+                        }
 
 #ifdef REGISTER_TIMES
                         std::chrono::steady_clock::time_point time_EndMerge = std::chrono::steady_clock::now();
