@@ -34,10 +34,11 @@
 #include <mutex>
 #include <chrono>
 
-#include "Lost.h"
 #include <ceres/ceres.h>
 #include <ceres/autodiff_cost_function.h>
-
+#include "Lost.h"
+#include "TwoViewReconstruction.h"
+#include "Utils.h"
 
 using namespace std;
 
@@ -1796,415 +1797,36 @@ void Tracking::ResetFrameIMU()
 
 //---------------------------newly added---------------------------
 
-void plotFlow(const Frame& f,
-              const std::vector<cv::Point2f>& vStart,
-              const std::vector<cv::Point2f>& vEnd,
-              std::string windowName)
+void plotHomographyFlow(const Eigen::Matrix3f& K, const Eigen::Matrix3f& R,
+                        const std::vector<cv::KeyPoint>& vKeys1, const std::vector<cv::KeyPoint>& vKeys2,
+                        const std::vector<int> matches, cv::Mat image, std::string windowName)
 {
-    cv::Mat image;
-    std::vector<cv::Mat> imgArray {f.imgLeft, f.imgLeft, f.imgLeft};
-    cv::merge(imgArray, image);
+    Eigen::Matrix3f H_inf = K * R * K.inverse() ;
 
-    int N = vStart.size();
-    for (int i = 0; i < N; i++)
-    {
-        cv::Point2f start = vStart[i];
-        cv::Point2f end = vEnd[i];
-
-        cv::circle(image, start, 1, cv::Scalar(255, 0, 0));  //begin
-        cv::circle(image, end, 1, cv::Scalar(0, 0, 255)); //end
-        cv::line(image, start, end, cv::Scalar(0, 255, 0));
-    }
-    cv::imshow(windowName, image);
-}
-
-
-bool checkDisparity(const Frame& f1, const Frame& f2,
-                    const vector<std::pair<int,int>>& vMatches12,
-                    const vector<bool>& vbMatchesInlier)
-{
-    std::vector<float> all_disparity;
-
-    for(size_t i=0; i < vMatches12.size();i++)
-    {
-        if (!vbMatchesInlier[i])
-            continue;
-
-        const cv::KeyPoint &kp1 = f1.mvKeysUn[vMatches12[i].first];
-        const cv::KeyPoint &kp2 = f2.mvKeysUn[vMatches12[i].second];
-
-        float disparity = sqrt((kp1.pt.x - kp2.pt.x) * (kp1.pt.x - kp2.pt.x) +
-                               (kp1.pt.y - kp2.pt.y) * (kp1.pt.y - kp2.pt.y));
-//        std::cout << disparity << std::endl;
-        all_disparity.push_back(disparity);
-    }
-
-    if (all_disparity.size() != 0)
-    {
-        sort(all_disparity.begin(), all_disparity.end());
-        size_t index = std::min(100, int(all_disparity.size() / 2));
-        std::cout << "median disparity:" << all_disparity[index] << std::endl;
-        if (all_disparity[index] > 3)
-            return true;
-    }
-    return false;
-}
-
-bool CheckPureRotation(const Eigen::Matrix3f& K, const Sophus::SE3f& T21,
-                       const Frame& f1, const Frame& f2,
-                       const vector<std::pair<int,int>>& vMatches12, const vector<bool>& vbMatchesInlier)
-{
-
-    ceres::Problem problem;
-    ceres::Solver::Options options;
-    Eigen::Matrix3f K_inv = K.inverse();
-
-    std::vector<std::pair<float, float>> homography_ratio_and_normBefore;
-    std::vector<float> all_diffs;
-    std::vector<float> diff_optimized;
-    std::vector<cv::Point2f> vf2Feature;
-    std::vector<cv::Point2f> vf1Feature;
-    std::vector<cv::Point2f> vf1Feature_in_f2;
-    std::vector<cv::Point2f> vf1Feature_in_f2_optimized;
-
-    Eigen::Matrix3f H_inf = K * T21.rotationMatrix() * K.inverse();
-
-    float inlier_num = 0.0;
-    float total_dist = 0.0;
-
-    for(size_t i=0; i < vMatches12.size();i++)
-    {
-        if (!vbMatchesInlier[i])
-            continue;
-
-        const cv::KeyPoint& kp1 = f1.mvKeysUn[vMatches12[i].first];
-        const cv::KeyPoint& kp2 = f2.mvKeysUn[vMatches12[i].second];
-
-        Eigen::Vector3f p1(kp1.pt.x, kp1.pt.y, 1);
-        Eigen::Vector3f p2(kp2.pt.x, kp2.pt.y, 1);
-
-        Eigen::Vector3f p2_projected = H_inf * p1;
-        p2_projected = p2_projected / p2_projected(2);
-
-        float dist = sqrt( (p2_projected(0) - p2(0)) * (p2_projected(0) - p2(0)) +
-                           (p2_projected(1) - p2(1)) * (p2_projected(1) - p2(1)) );
-
-
-        Eigen::Vector3f flow_before = p2 - p1;
-        Eigen::Vector3f flow_after = p2 - p2_projected;
-
-        float ratio = flow_before.norm() / flow_after.norm();
-        homography_ratio_and_normBefore.push_back(std::make_pair(ratio, flow_before.norm()));
-//        std::cout << flow_after.normalized().transpose() << std::endl;
-//        flow_before.dot(flow)
-//        std::cout << vMatches12[i].first << " " << vMatches12[i].second << std::endl;
-
-        all_diffs.push_back(dist);
-        total_dist += dist;
-        inlier_num++;
-
-        vf1Feature.emplace_back(p1(0), p1(1));
-        vf2Feature.emplace_back(p2(0), p2(1));
-        vf1Feature_in_f2.emplace_back(p2_projected(0), p2_projected(1));
-    }
-
-    // ----------------------optimize q---------------
-    Eigen::Quaterniond optimized_q(T21.unit_quaternion().w(),T21.unit_quaternion().x(), T21.unit_quaternion().y(), T21.unit_quaternion().z());
-    for(size_t i=0; i < vMatches12.size();i++) {
-        if (!vbMatchesInlier[i])
-            continue;
-
-        const cv::KeyPoint &kp1 = f1.mvKeysUn[vMatches12[i].first];
-        const cv::KeyPoint &kp2 = f2.mvKeysUn[vMatches12[i].second];
-
-        Eigen::Vector3f p1(kp1.pt.x, kp1.pt.y, 1);
-        Eigen::Vector3f p2(kp2.pt.x, kp2.pt.y, 1);
-
-        Eigen::Vector3f bv1 = K_inv * p1;
-        Eigen::Vector3f bv2 = K_inv * p2;
-        bv1.normalize();
-        bv2.normalize();
-
-        ceres::CostFunction* costFunction =
-                new ceres::AutoDiffCostFunction<PureRotationFunctor, 1, 4>(
-                        new PureRotationFunctor(bv1, bv2));
-        problem.AddResidualBlock(costFunction, new ceres::HuberLoss(1 - cos(atan(sqrt(2.0)*3/522.0))),
-                                 optimized_q.coeffs().data());
-    }
-
-
-    options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-    options.minimizer_progress_to_stdout = false;
-    options.max_num_iterations = 100;
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-    std::cout << summary.BriefReport() <<"\n";
-
-    Eigen::Quaternionf optimized_qf(optimized_q.w(), optimized_q.x(),optimized_q.y(),optimized_q.z());
-    Eigen::Matrix3f H_inf_optimzied = K * optimized_qf.toRotationMatrix() * K.inverse();
-
-
-    for(size_t i=0; i < vMatches12.size();i++)
-    {
-        if (!vbMatchesInlier[i])
-            continue;
-
-        const cv::KeyPoint &kp1 = f1.mvKeysUn[vMatches12[i].first];
-        const cv::KeyPoint &kp2 = f2.mvKeysUn[vMatches12[i].second];
-
-        Eigen::Vector3f p1(kp1.pt.x, kp1.pt.y, 1);
-        Eigen::Vector3f p2(kp2.pt.x, kp2.pt.y, 1);
-        Eigen::Vector3f p2_projected = H_inf_optimzied * p1;
-        p2_projected = p2_projected / p2_projected(2);
-
-        Eigen::Vector3f flow_optimized = p2 - p2_projected;
-
-        float dist = sqrt( (p2_projected(0) - p2(0)) * (p2_projected(0) - p2(0)) +
-                           (p2_projected(1) - p2(1)) * (p2_projected(1) - p2(1)) );
-        diff_optimized.push_back(dist);
-
-        vf1Feature_in_f2_optimized.emplace_back(p2_projected(0), p2_projected(1));
-
-    }
-    //TODO: 1.finish optimization and evaluation 2. adjust huber loss
-
-    // ----------------------optimize q---------------
-
-
-    if (all_diffs.size() > 0)
-    {
-        sort(all_diffs.begin(), all_diffs.end());
-        sort(homography_ratio_and_normBefore.begin(), homography_ratio_and_normBefore.end());
-        sort(diff_optimized.begin(), diff_optimized.end());
-        std::cout << "ratio, before norm: ";
-        std::cout << homography_ratio_and_normBefore[homography_ratio_and_normBefore.size() / 2].first << ","
-                  << homography_ratio_and_normBefore[homography_ratio_and_normBefore.size() / 2].second << std::endl;
-
-//        std::cout << "*********\n";
-//        for (int i = 0; i < all_diffs.size(); i++)
-//            std::cout << all_diffs[i] << std::endl;
-//        std::cout << "*********\n";
-        std::cout << "all_diffs.size():" << all_diffs.size() << std::endl;
-        std::cout << "H_inf:" << H_inf << std::endl;
-        std::cout << "median cost:" << all_diffs[all_diffs.size() / 2] << std::endl;
-        std::cout << "optimized median cost:" << diff_optimized[diff_optimized.size() / 2] << std::endl;
-        std::cout << "average cost:" << total_dist / inlier_num << std::endl;
-        plotFlow(f2, vf2Feature, vf1Feature, "OriginFlow");
-        plotFlow(f2, vf2Feature, vf1Feature_in_f2, "Homography flow");
-        plotFlow(f2, vf2Feature, vf1Feature_in_f2_optimized, "optimized homography flow");
-        cv::waitKey(0);
-
-        if (homography_ratio_and_normBefore[homography_ratio_and_normBefore.size() / 2].first > 4)
-            return true;
-    }
-
-    return false;
-}
-
-bool onePointRansac(const Eigen::Matrix3f& K,
-                    const Frame& f1, const Frame& f2, const vector<std::pair<int,int>>& vMatches12,
-                    Sophus::SE3f &T21,
-                    vector<cv::Point3f> &vP3D,
-                    vector<bool> &vbTriangulated,
-                    vector<bool> &vbMatchesInlier)
-{
-    std::cout << "*******\n";
-    Eigen::Matrix3f K_inv = K.inverse();
-
-    // calculate best model
-    std::vector<double> results;
-    for (int i = 0 ; i < vMatches12.size(); i++)
-    {
-        int i_f1 = vMatches12[i].first;
-        int i_f2 = vMatches12[i].second;
-
-        Eigen::Vector3f bv1(f1.mvKeysUn[i_f1].pt.x, f1.mvKeysUn[i_f1].pt.y, 1);
-        Eigen::Vector3f bv2(f2.mvKeysUn[i_f2].pt.x, f2.mvKeysUn[i_f2].pt.y, 1);
-        bv1 = K_inv * bv1;
-        bv2 = K_inv * bv2;
-        bv1.normalize();
-        bv2.normalize();
-
-        double theta = -2*std::atan((bv2.x()*bv1.y() - bv1.x()*bv2.y()) /
-                                    (bv2.z()*bv1.y() + bv1.z()*bv2.y()));
-        results.emplace_back(theta);
-    }
-
-    sort(results.begin(), results.end());
-//    for (int i = 0 ; i < results.size(); i++)
-//    {
-//        std::cout << results[i] << std::endl;
-//    }
-    std::cout << "one point method median:" << results[results.size() / 2] << std::endl;
-    double best_theta = results[results.size() / 2];
-
-    // determine model
-    Eigen::Matrix3f Rc2c1;
-    Rc2c1 << cos(best_theta), 0, -sin(best_theta),
-            0, 1, 0,
-            sin(best_theta), 0, cos(best_theta);
-    Eigen::Vector3f tc2c1(sin(best_theta /2), 0, -cos(best_theta / 2));
-    Eigen::Matrix3f E;
-    E << 0, cos(best_theta / 2), 0,
-         -cos(best_theta / 2), 0, sin(best_theta / 2),
-         0, sin(best_theta / 2), 0;
-    Eigen::Matrix3f F = K_inv.transpose() * E * K_inv;
-    const float th = 3.841;
-    std::cout << "best_theta:" << best_theta << std::endl;
-    std::cout << "t from one point:" << tc2c1.transpose() << std::endl;
-
-    // determine inliers
-    std::vector<bool> vbInliers;
-    int nInlier = 0;
-    vbInliers.reserve(vMatches12.size());
-    for (int i = 0 ; i < vMatches12.size(); i++)
-    {
-        int i_f1 = vMatches12[i].first;
-        int i_f2 = vMatches12[i].second;
-
-        Eigen::Vector3f bv1(f1.mvKeysUn[i_f1].pt.x, f1.mvKeysUn[i_f1].pt.y, 1);
-        Eigen::Vector3f bv2(f2.mvKeysUn[i_f2].pt.x, f2.mvKeysUn[i_f2].pt.y, 1);
-
-        Eigen::Vector3f l2 = F * bv1;
-        const float num2 = bv2.dot(l2);
-        const float squareDist1 = num2 * num2 / (l2(0) * l2(0) + l2(1) * l2(1));
-
-        Eigen::Vector3f l1 = F.transpose() * bv2;
-        const float num1 = bv1.dot(l1);
-        const float squareDist2 = num1 * num1 / (l1(0) * l1(0) + l1(1) * l1(1));
-
-        if (squareDist1 > th || squareDist2 > th)
-            vbInliers[i] = false;
-        else
-        {
-            vbInliers[i] = true;
-            nInlier++;
-        }
-    }
-
-    // plot flow
-    Eigen::Matrix3f H_inf = K * Rc2c1 * K.inverse();
     std::vector<cv::Point2f> vf2Feature;
     std::vector<cv::Point2f> vf1Feature_in_f2;
-    for (int i = 0; i < vMatches12.size(); i++)
+    assert(vKeys1.size() == matches.size());
+    for (int i = 0; i < matches.size(); i++)
     {
-        if (!vbInliers[i])
+        if (matches[i] < 0)
             continue;
-        int i_f1 = vMatches12[i].first;
-        int i_f2 = vMatches12[i].second;
 
-        Eigen::Vector3f bv1(f1.mvKeysUn[i_f1].pt.x, f1.mvKeysUn[i_f1].pt.y, 1);
+        const cv::KeyPoint &kp1 = vKeys1[i];
+        const cv::KeyPoint &kp2 = vKeys2[matches[i]];
+
+        Eigen::Vector3f bv1(kp1.pt.x, kp1.pt.y, 1);
         Eigen::Vector3f f1Feature_in_f2 = H_inf * bv1;
         f1Feature_in_f2 = f1Feature_in_f2 / f1Feature_in_f2(2);
 
-        const float flow = (f2.mvKeysUn[i_f2].pt.x - f1Feature_in_f2(0)) * (f2.mvKeysUn[i_f2].pt.x - f1Feature_in_f2(0)) +
-                (f2.mvKeysUn[i_f2].pt.y - f1Feature_in_f2(1)) * (f2.mvKeysUn[i_f2].pt.y - f1Feature_in_f2(1));
+//               const float flow = (f2.mvKeysUn[i_f2].pt.x - f1Feature_in_f2(0)) * (f2.mvKeysUn[i_f2].pt.x - f1Feature_in_f2(0)) +
+//                                  (f2.mvKeysUn[i_f2].pt.y - f1Feature_in_f2(1)) * (f2.mvKeysUn[i_f2].pt.y - f1Feature_in_f2(1));
 
-        vf2Feature.emplace_back(f2.mvKeysUn[i_f2].pt.x, f2.mvKeysUn[i_f2].pt.y);
+        vf2Feature.emplace_back(kp2.pt.x, kp2.pt.y);
         vf1Feature_in_f2.emplace_back(f1Feature_in_f2(0), f1Feature_in_f2(1));
     }
-
-
-
-    // Triangulate point
-    float parallax;
-
-    int nGood = TwoViewReconstruction::CheckRT(Rc2c1, tc2c1, f1.mvKeysUn, f2.mvKeysUn, vMatches12,
-                                               vbInliers, K, vP3D, 4, vbTriangulated, parallax);
-    std::cout << "nGood, nInlier, parallax:" << nGood << ", " << nInlier <<  ", " << parallax << std::endl;
-
-    if (parallax > 0.5)
-    {
-        vbMatchesInlier = vbInliers;
-        T21 = Sophus::SE3f(Rc2c1, tc2c1);
-        return true;
-    }
-    else return false;
-
-//    int nGood = 0;
-//    std::vector<Eigen::Vector3f> vP3D;
-//    Eigen::Matrix<float, 3, 4> P1;
-//    P1.setZero();
-//    P1.block<3,3>(0,0) = K;
-//
-//    Eigen::Matrix<float,3,4> P2;
-//    P2.block<3,3>(0,0) = Rc2c1;
-//    P2.block<3,1>(0,3) = tc2c1;
-//    P2 = K * P2;
-//
-//    Eigen::Vector3f O1 = Eigen::Vector3f::Zero();
-//    Eigen::Vector3f O2 = -Rc2c1.transpose() * tc2c1;
-//
-//    for (int i = 0 ; i < vMatches12.size(); i++)
-//    {
-//        if (!vbInliers[i])
-//            continue;
-//
-//        int i_f1 = vMatches12[i].first;
-//        int i_f2 = vMatches12[i].second;
-//
-//        Eigen::Vector3f p3dC1 = Eigen::Vector3f::Zero();
-//        Eigen::Vector3f x_p1(f1.mvKeysUn[i_f1].pt.x, f1.mvKeysUn[i_f1].pt.y, 1);
-//        Eigen::Vector3f x_p2(f2.mvKeysUn[i_f2].pt.x, f2.mvKeysUn[i_f2].pt.y, 1);
-//
-//        if (!GeometricTools::Triangulate(x_p1, x_p2, P1, P2, p3dC1))
-//            continue;
-//        if(!isfinite(p3dC1(0)) || !isfinite(p3dC1(1)) || !isfinite(p3dC1(2)))
-//        {
-//            continue;
-//        }
-//
-//        Eigen::Vector3f normal1 = p3dC1 - O1;
-//        float dist1 = normal1.norm();
-//        Eigen::Vector3f normal2 = p3dC1 - O2;
-//        float dist2 = normal2.norm();
-//        float cosParallax = normal1.dot(normal2) / (dist1*dist2);
-//
-//        if(p3dC1(2)<=0 && cosParallax<0.99998)
-//            continue;
-//
-//        std::cout << "index, x, y, z:" << i << ", " << p3dC1(0) << ", " << p3dC1(1) << ", "<< p3dC1(2) << std::endl;
-//    }
-
-
-    plotFlow(f2, vf2Feature, vf1Feature_in_f2, "one point method");
+    Utils::plotFlow(image, vf2Feature, vf1Feature_in_f2, windowName);
     cv::waitKey(0);
-
-//    DUtils::Random::SeedRandOnce(0);
-//
-//    vector<std::pair<int,int>> vAvailableMatches = vMatches12;
-//    const int N = vMatches12.size();
-//    const int maxIteration = 200;
-//    int iteration = 0;
-//
-//    int nbestInliersCount = -INT_MAX;
-//
-//    while (iteration < maxIteration)
-//    {
-//        // get sample
-//        int randi = DUtils::Random::RandomInt(0, vAvailableMatches.size()-1);
-//        int sampleIndex1 = vAvailableMatches[randi].first;
-//        int sampleIndex2 = vAvailableMatches[randi].second;
-//        vAvailableMatches[randi] = vAvailableMatches.back();
-//        vAvailableMatches.pop_back();
-//
-//        // compute model
-//        Eigen::Vector3f bv1(f1.mvKeysUn[sampleIndex1].pt.x, f1.mvKeysUn[sampleIndex1].pt.y, 1);
-//        Eigen::Vector3f bv2(f2.mvKeysUn[sampleIndex2].pt.x, f2.mvKeysUn[sampleIndex2].pt.y, 1);
-//        bv1 = K_inv * bv1;
-//        bv2 = K_inv * bv2;
-//        bv1.normalize();
-//        bv2.normalize();
-//
-//        double theta = -2*std::atan((bv2.x()*bv1.y() - bv1.x()*bv2.y()) /
-//                                    (bv2.z()*bv1.y() + bv1.z()*bv2.y()));
-//    }
-
-
-
-
 }
-
 //---------------------------newly added---------------------------
 
 void Tracking::Track()
@@ -2869,33 +2491,73 @@ void Tracking::MonocularInitializationNew()
 {
     if(!mbReadyToInitializate)
     {
-        // Set Reference Frame
         if(mCurrentFrame.mvKeys.size()>100)
         {
-
-            mInitialFrame = Frame(mCurrentFrame);
-            mLastFrame = Frame(mCurrentFrame);
-            mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
-            for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
-                mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
-
-            fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
-
-            if (mSensor == System::IMU_MONOCULAR)
+            if (!mbReInitialization)
             {
-                if(mpImuPreintegratedFromLastKF)
+                mInitialFrame = Frame(mCurrentFrame);
+                mLastFrame = Frame(mCurrentFrame);
+                mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
+                for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
+                    mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
+
+                fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
+
+                if (mSensor == System::IMU_MONOCULAR)
                 {
-                    delete mpImuPreintegratedFromLastKF;
+                    if(mpImuPreintegratedFromLastKF)
+                    {
+                        delete mpImuPreintegratedFromLastKF;
+                    }
+                    mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
+                    mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+
                 }
-                mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
-                mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
 
+                mbReadyToInitializate = true;
+
+                return;
             }
+            else
+            {
+                // prepare variable
+                std::vector<cv::Point2f> vbPrevMatched;
+                std::vector<int> matches;
+                vbPrevMatched.resize(mLastFrame.mvKeysUn.size());
+                for(size_t i=0; i<mLastFrame.mvKeysUn.size(); i++)
+                    vbPrevMatched[i]=mLastFrame.mvKeysUn[i].pt;
+                fill(matches.begin(),matches.end(),-1);
 
-            mbReadyToInitializate = true;
+                // match
+                ORBmatcher matcher(0.9,true);
+                int nmatches = matcher.SearchForInitialization(mLastFrame,mInitialFrame,vbPrevMatched,matches,100);
 
-            return;
+                // transform matches to another form
+                std::vector<std::pair<int, int>> matches12;
+                for(size_t i=0, iend=matches.size();i<iend; i++)
+                {
+                    if(matches[i]>=0)
+                    {
+                        matches12.push_back(make_pair(i,matches[i]));
+                    }
+                }
+
+                // estimate the motion
+                float alpha = TwoViewReconstruction::FindAckermannTheta(mpCamera->toK_(), mLastFrame.mvKeysUn, mInitialFrame.mvKeysUn, matches12);
+
+                // TODO: record the motion information (translation from velocity, rotation)
+                std::cout << "velocity:" << mVelocity.translation().transpose() << std::endl;
+                std::cout << "lastFrame timestamp:" << mLastFrame.mTimeStamp << std::endl;
+                std::cout << "lastKeyFrame timestamp:" << mpLastKeyFrame->mTimeStamp << std::endl;
+                std::cout << "current timestamp:" << mInitialFrame.mTimeStamp << std::endl;
+
+                mLastFrame = Frame(mCurrentFrame);
+                mbReadyToInitializate = true;
+            }
         }
+
+        // Set Reference Frame
+
     }
     else
     {
@@ -2924,31 +2586,27 @@ void Tracking::MonocularInitializationNew()
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
         vector<bool> vbMatchesInliers;
 
-//        bool success = mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,Tcw,mvIniP3D,vbTriangulated,vbMatchesInliers);
-        vector<pair<int,int>> vMatches12;
-        for(size_t i=0, iend=mvIniMatches.size();i<iend; i++)
-        {
-            if(mvIniMatches[i]>=0)
-            {
-                vMatches12.push_back(make_pair(i,mvIniMatches[i]));
-            }
-        }
-        bool success = onePointRansac(mpCamera->toK_(), mInitialFrame,mCurrentFrame, vMatches12, Tcw, mvIniP3D, vbTriangulated, vbMatchesInliers);
+        // mvIniMatches: idx(f1 feature index), value(f2 feature index)
+        bool success = mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,
+                                                         Tcw,mvIniP3D,vbTriangulated,vbMatchesInliers);
 
-//        success = false;
-//        if (Tcw.translation().norm() > 10e-6)
-//        {
-//
-//
-//            if (success)
-//            {
-//                bool diparityEnough = checkDisparity(mInitialFrame, mCurrentFrame, vMatches12, vbMatchesInliers);
-//                bool pureRotation = CheckPureRotation(mpCamera->toK_(), Tcw, mInitialFrame, mCurrentFrame, vMatches12, vbMatchesInliers);
-//
-//                success = diparityEnough & !pureRotation;
-//            }
-//
-//        }
+        Utils::plotMatches(mInitialFrame, mCurrentFrame, mvIniMatches);
+        
+        bool bPlotFlow = true;
+        if (bPlotFlow)
+        {
+            std::vector<int> tempMatches = mvIniMatches;
+            for(size_t i=0, iend=tempMatches.size(); i<iend;i++)
+            {
+                if(tempMatches[i]>=0 && !vbMatchesInliers[i])
+                {
+                    tempMatches[i]=-1;
+                    nmatches--;
+                }
+            }
+            plotHomographyFlow(mpCamera->toK_(), Tcw.rotationMatrix(), mInitialFrame.mvKeysUn,
+                               mCurrentFrame.mvKeysUn, tempMatches, mCurrentFrame.imgLeft, "one point method(model inliers)");
+        }
 
 
         if(success)
@@ -2962,9 +2620,17 @@ void Tracking::MonocularInitializationNew()
                 }
             }
 
+            // plot triangulated flow
+            if (bPlotFlow)
+                plotHomographyFlow(mpCamera->toK_(), Tcw.rotationMatrix(), mInitialFrame.mvKeysUn,
+                                   mCurrentFrame.mvKeysUn, mvIniMatches, mCurrentFrame.imgLeft, "one point method(3D points)");
+
             // Set Frame Poses
             mInitialFrame.SetPose(Sophus::SE3f());
             mCurrentFrame.SetPose(Tcw);
+
+            if (!mbReInitialization)
+                mbReInitialization = true;
 
             CreateInitialMapMonocular();
         }
@@ -3214,13 +2880,14 @@ void Tracking::CreateMapInAtlas()
         mpImuPreintegratedFromLastKF = new IMU::Preintegrated(IMU::Bias(),*mpImuCalib);
     }
 
-    if(mpLastKeyFrame)
-        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+//    if(mpLastKeyFrame)
+//        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+//
+//    if(mpReferenceKF)
+//        mpReferenceKF = static_cast<KeyFrame*>(NULL);
+//
+//    mLastFrame = Frame();
 
-    if(mpReferenceKF)
-        mpReferenceKF = static_cast<KeyFrame*>(NULL);
-
-    mLastFrame = Frame();
     mCurrentFrame = Frame();
     mvIniMatches.clear();
 
