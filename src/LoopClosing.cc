@@ -201,7 +201,7 @@ void LoopClosing::Run()
                         }
                         f.close();
 
-                        exit(0);
+//                        exit(0);
                         //mpTracker->SetStepByStep(true);
 
                         Verbose::PrintMess("*Merge detected", Verbose::VERBOSITY_QUIET);
@@ -216,6 +216,7 @@ void LoopClosing::Run()
                             MergeLocal2();
                         else
                         {
+                            MergeLocal3();
 //                            MergeLocal();
                         }
 
@@ -1485,6 +1486,10 @@ void LoopClosing::MergeLocal()
         }
         pKFi->mTcwMerge  = pKFi->GetPose();
 
+        //vNonCorrectedSim3表示每一帧（w1坐标系下的每一帧）在w1坐标系（current frame坐标系）下的位姿也就是Siw1， 这个scale应该都是1
+        //vCorrectedSim3表示每一帧（w1坐标系下的每一帧）在w2坐标系下（merge frame坐标系）下的位姿也就是Siw2，这个scale戴上了两个坐标系之间的scale difference
+
+
         // Update keyframe pose with corrected Sim3. First transform Sim3 to SE3 (scale translation)
         double s = g2oCorrectedSiw.scale();
         pKFi->mfScale = s;
@@ -2098,6 +2103,200 @@ void LoopClosing::MergeLocal2()
 
     return;
 }
+
+void LoopClosing::MergeLocal3()
+{
+    // If a Global Bundle Adjustment is running, abort it
+    bool bRelaunchBA = false;
+    //Verbose::PrintMess("MERGE-VISUAL: Check Full Bundle Adjustment", Verbose::VERBOSITY_DEBUG);
+    if(isRunningGBA())
+    {
+        unique_lock<mutex> lock(mMutexGBA);
+        mbStopGBA = true;
+
+        mnFullBAIdx++;
+
+        if(mpThreadGBA)
+        {
+            mpThreadGBA->detach();
+            delete mpThreadGBA;
+        }
+        bRelaunchBA = true;
+    }
+
+    mpLocalMapper->RequestStop();
+    // Wait until Local Mapping has effectively stopped
+    while(!mpLocalMapper->isStopped())
+    {
+        usleep(1000);
+    }
+    //cout << "Local Map stopped" << endl;
+    mpLocalMapper->EmptyQueue();
+
+    std::cout << "************************************\n";
+
+    vector<Map*> allMaps = mpAtlas->GetAllMaps();
+    for (Map* curMap: allMaps)
+    {
+        vector<KeyFrame*> curAllKeyFrames = curMap->GetAllKeyFrames();
+        sort(curAllKeyFrames.begin(), curAllKeyFrames.end(), [](auto prev, auto next) -> bool
+        {
+            return prev->mnFrameId < next->mnFrameId;
+        });
+
+        KeyFrame* lastKf = nullptr;
+        for (KeyFrame* curKf: curAllKeyFrames)
+        {
+            if (!(mpAtlas->mpLostManager->findNode(curKf->mnFrameId)))
+                mpAtlas->mpLostManager->addGraphNode(curKf->mnFrameId, curKf->GetPose(), false);
+
+            vector<KeyFrame*> covisibleKfs = curKf->GetBestCovisibilityKeyFrames(2); // adjust it
+            if (covisibleKfs.empty())
+                continue;
+            for (KeyFrame* covKf: covisibleKfs)
+            {
+                if (!(mpAtlas->mpLostManager->findNode(covKf->mnFrameId)))
+                    mpAtlas->mpLostManager->addGraphNode(covKf->mnFrameId, covKf->GetPose(), false);
+                Sophus::SE3f Tc1c0 = covKf->GetPose() * curKf->GetPose().inverse();
+                mpAtlas->mpLostManager->addNormalEdges(curKf->mnFrameId, covKf->mnFrameId, Tc1c0, 1.0);
+            }
+
+            if (lastKf != nullptr)
+            {
+                Sophus::SE3f Tcl = curKf->GetPose() * lastKf->GetPose().inverse();
+                mpAtlas->mpLostManager->addNormalEdges(lastKf->mnFrameId, curKf->mnFrameId, Tcl, 1.0);
+            }
+            lastKf = curKf;
+        }
+    }
+
+
+
+    // calculate sim3 transformation from current to merged and set current as fixed
+    Sophus::SE3d Tmw = mpMergeMatchedKF->GetPose().cast<double>();
+    g2o::Sim3 g2oSmw2(Tmw.unit_quaternion(), Tmw.translation(), 1.0);
+    Sophus::SE3f Tlw(mg2oMergeSlw.rotation().cast<float>(), mg2oMergeSlw.translation().cast<float>());
+    g2o::Sim3 g2oSml = g2oSmw2 * mg2oMergeSlw.inverse();
+    Sophus::SE3f Tml(g2oSml.rotation().cast<float>(), g2oSml.translation().cast<float>());
+    mpAtlas->mpLostManager->addNormalEdges(0, mpCurrentKF->mnFrameId, Tlw, mg2oMergeSlw.scale());
+
+//    mpAtlas->mpLostManager->addNormalEdges(mpCurrentKF->mnFrameId, mpMergeMatchedKF->mnFrameId, Tml, g2oSml.scale());
+//    if (!mpAtlas->mpLostManager->setFixed(mpCurrentKF->mnFrameId))
+    if (!mpAtlas->mpLostManager->setFixed(mpMergeMatchedKF->mnFrameId))
+        std::cout << "Node(" << mpMergeMatchedKF->mnFrameId << ") does not exist, can not set it fixed" << std::endl;
+    std::cout << "graph infor...\n";
+    mpAtlas->mpLostManager->PringGraphShortInfo();
+
+    mpAtlas->mpLostManager->optimize();
+
+    mpAtlas->mpLostManager->PrintNodes();
+//    exit(0);
+    // --------------------------------optimize done --------------------------
+
+
+    // ------------------ maintain keyframe and points-------------
+    Map* pMergeMap = mpMergeMatchedKF->GetMap();
+    Map* pCurrentMap = mpCurrentKF->GetMap();
+
+    {
+        unique_lock<mutex> currentLock(pCurrentMap->mMutexMapUpdate); // We update the current map with the Merge information
+        unique_lock<mutex> mergeLock(pMergeMap->mMutexMapUpdate); // We remove the Kfs and MPs in the merged area from the old map
+
+        for (Map* curMap: allMaps)
+        {
+            vector<KeyFrame*> curAllKeyFrames = curMap->GetAllKeyFrames();
+            vector<MapPoint*> curAllMapPoints = curMap->GetAllMapPoints();
+
+            for(MapPoint* pMPi: curAllMapPoints)
+            {
+                if(!pMPi || pMPi->isBad())
+                    continue;
+
+                KeyFrame* pKf = pMPi->GetReferenceKeyFrame();
+                Sophus::SE3f Tcw1 = pKf->GetPose();
+
+                g2o::Sim3 Scw2;
+                if (mpAtlas->mpLostManager->findNode(pKf->mnFrameId))
+                    Scw2 = mpAtlas->mpLostManager->getSimPose(pKf->mnFrameId);
+                else
+                {
+                    std::cout << "kf " << pKf->mnFrameId << " not optimized, error(point)!\n";
+                    continue;
+                }
+                Eigen::Vector3d P3Dw1 = pMPi->GetWorldPos().cast<double>();
+                Eigen::Vector3d P3Dw2 = Scw2.inverse().map(Tcw1.cast<double>() * P3Dw1);
+                Eigen::Quaterniond Rcor = Scw2.inverse().rotation() * Tcw1.unit_quaternion().cast<double>();
+
+                pMPi->SetWorldPos(P3Dw2.cast<float>());
+                pMPi->SetNormalVector(Rcor.cast<float>() * pMPi->GetNormal());
+
+                if (curMap != pMergeMap)
+                {
+                    pMPi->UpdateMap(pMergeMap);
+                    pMergeMap->AddMapPoint(pMPi);
+                    curMap->EraseMapPoint(pMPi);
+                }
+            }
+
+            for (KeyFrame* pKFi: curAllKeyFrames)
+            {
+                if(!pKFi || pKFi->isBad())
+                    continue;
+
+                g2o::Sim3 Scw;
+                if (mpAtlas->mpLostManager->findNode(pKFi->mnFrameId))
+                    Scw = mpAtlas->mpLostManager->getSimPose(pKFi->mnFrameId);
+                else
+                    std::cout << "kf " << pKFi->mnFrameId << " not optimized, error(kf)!\n";
+                pKFi->SetPose(Sophus::SE3f(Scw.rotation().cast<float>(),
+                                           (Scw.translation() / Scw.scale()).cast<float>()));
+
+                if (curMap != pMergeMap)
+                {
+                    pKFi->UpdateMap(pMergeMap);
+                    pMergeMap->AddKeyFrame(pKFi);
+                    curMap->EraseKeyFrame(pKFi);
+                }
+            }
+
+            if (curMap != pMergeMap)
+                mpAtlas->SetMapBad(curMap);
+        }
+
+
+
+        mpAtlas->ChangeMap(pMergeMap);
+
+        std::cout << "changed map" << std::endl;
+
+        //TODO: maintain map, consider updating essential graph
+    }
+
+    mpCurrentKF->UpdateConnections();
+    pCurrentMap->GetOriginKF()->SetFirstConnection(false);
+    KeyFrame *pNewChild = mpCurrentKF->GetParent(); // Old parent, it will be the new child of this KF
+    KeyFrame *pNewParent = mpCurrentKF; // Old child, now it will be the parent of its own parent(we need eliminate this KF from children list in its old parent)
+    mpCurrentKF->ChangeParent(mpMergeMatchedKF);
+    while(pNewChild)
+    {
+        pNewChild->EraseChild(pNewParent); // We remove the relation between the old parent and the new for avoid loop
+        KeyFrame * pOldParent = pNewChild->GetParent();
+
+        pNewChild->ChangeParent(pNewParent);
+
+        pNewParent = pNewChild;
+        pNewChild = pOldParent;
+        if (pNewChild)
+            std::cout << "newChildId:" << pNewChild->mnFrameId << std::endl;
+    }
+
+    mpMergeMatchedKF->UpdateConnections();
+    pCurrentMap->IncreaseChangeIndex();
+    pMergeMap->IncreaseChangeIndex();
+    mpLocalMapper->Release();
+    mpAtlas->RemoveBadMaps();
+}
+
 
 void LoopClosing::CheckObservations(set<KeyFrame*> &spKFsMap1, set<KeyFrame*> &spKFsMap2)
 {

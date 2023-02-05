@@ -117,7 +117,8 @@ include/TwoViewReconstruction.h
 include/SerializationUtils.h
 include/Config.h
 include/Settings.h
-include/Lost.h
+include/LostManager.h
+src/LostManager.cc
 include/Utils.h
 src/Utils.cc)
 

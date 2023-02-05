@@ -43,10 +43,6 @@ namespace ORB_SLAM3
                 match.trainIdx = matches[i];
                 cvMatches.push_back(match);
             }
-            // std::cout << i << "," <<  matches[i] << std::endl;
-
-            // keys1.push_back(f1.mvKeys[i].pt);
-            // keys2.push_back(f1.mvKeys[matches[i]].pt);
         }
         cv::Mat outImage;
         cv::drawMatches(image1, f1.mvKeysUn, image2, f2.mvKeysUn, cvMatches, outImage);

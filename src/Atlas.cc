@@ -28,11 +28,13 @@ namespace ORB_SLAM3
 
 Atlas::Atlas(){
     mpCurrentMap = static_cast<Map*>(NULL);
+    mpLostManager = new LostManager();
 }
 
 Atlas::Atlas(int initKFid): mnLastInitKFidMap(initKFid), mHasViewer(false)
 {
     mpCurrentMap = static_cast<Map*>(NULL);
+    mpLostManager = new LostManager();
     CreateNewMap();
 }
 
@@ -53,6 +55,7 @@ Atlas::~Atlas()
             ++it;
 
     }
+    delete mpLostManager;
 }
 
 void Atlas::CreateNewMap()

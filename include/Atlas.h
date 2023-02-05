@@ -25,6 +25,7 @@
 #include "GeometricCamera.h"
 #include "Pinhole.h"
 #include "KannalaBrandt8.h"
+#include "LostManager.h"
 
 #include <set>
 #include <mutex>
@@ -162,6 +163,9 @@ protected:
     // Mutex
     std::mutex mMutexAtlas;
 
+    //----------new ----------
+public:
+    LostManager* mpLostManager;
 
 }; // class Atlas
 

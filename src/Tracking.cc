@@ -36,7 +36,7 @@
 
 #include <ceres/ceres.h>
 #include <ceres/autodiff_cost_function.h>
-#include "Lost.h"
+
 #include "TwoViewReconstruction.h"
 #include "Utils.h"
 
@@ -51,7 +51,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
-    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)), T_w2init_w1last(Sophus::SE3f())
 {
     // Load camera parameters from settings file
     if(settings){
@@ -2334,6 +2334,7 @@ void Tracking::Track()
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
 
+//        std::cout << "current ID: " << mCurrentFrame.mnId << std::endl;
         mLastFrame = Frame(mCurrentFrame);
     }
 
@@ -2493,15 +2494,17 @@ void Tracking::MonocularInitializationNew()
     {
         if(mCurrentFrame.mvKeys.size()>100)
         {
+            mInitialFrame = Frame(mCurrentFrame);
+            mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
+            for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
+                mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
+
+            fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
+
+            // first initialization or reinitialization
             if (!mbReInitialization)
             {
-                mInitialFrame = Frame(mCurrentFrame);
                 mLastFrame = Frame(mCurrentFrame);
-                mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
-                for(size_t i=0; i<mCurrentFrame.mvKeysUn.size(); i++)
-                    mvbPrevMatched[i]=mCurrentFrame.mvKeysUn[i].pt;
-
-                fill(mvIniMatches.begin(),mvIniMatches.end(),-1);
 
                 if (mSensor == System::IMU_MONOCULAR)
                 {
@@ -2520,18 +2523,23 @@ void Tracking::MonocularInitializationNew()
             }
             else
             {
+                //Note: there are 2 ID in keyframe, "frameID"(corresponding frame ID) and "ID"(keyframe ID)
+                std::cout << "mLastFrameOfKeyFrame.mnId:" << mLastFrameOfKeyFrame.mnId << ",mLastFrameOfKeyFrame.mTimestamp:" << mLastFrameOfKeyFrame.mTimeStamp <<std::endl;
+                std::cout << "mInitialFrame.mnId:" << mInitialFrame.mnId << ",mInitialFrame.mTimestamp:" << mInitialFrame.mTimeStamp <<std::endl;
+//                std::cout << "LastKeyframe.ID:" << mpLastKeyFrame->mnFrameId << ", mpLastKeyFrame.mTimestamp:" << mpLastKeyFrame->mTimeStamp << std::endl;
                 // prepare variable
                 std::vector<cv::Point2f> vbPrevMatched;
                 std::vector<int> matches;
-                vbPrevMatched.resize(mLastFrame.mvKeysUn.size());
-                for(size_t i=0; i<mLastFrame.mvKeysUn.size(); i++)
-                    vbPrevMatched[i]=mLastFrame.mvKeysUn[i].pt;
+                vbPrevMatched.resize(mLastFrameOfKeyFrame.mvKeysUn.size());
+                for(size_t i=0; i<mLastFrameOfKeyFrame.mvKeysUn.size(); i++)
+                    vbPrevMatched[i]=mLastFrameOfKeyFrame.mvKeysUn[i].pt;
                 fill(matches.begin(),matches.end(),-1);
 
                 // match
                 ORBmatcher matcher(0.9,true);
-                int nmatches = matcher.SearchForInitialization(mLastFrame,mInitialFrame,vbPrevMatched,matches,100);
 
+                int nmatches = matcher.SearchForInitialization(mLastFrameOfKeyFrame,mInitialFrame,vbPrevMatched,matches,100);
+                std::cout << nmatches << std::endl;
                 // transform matches to another form
                 std::vector<std::pair<int, int>> matches12;
                 for(size_t i=0, iend=matches.size();i<iend; i++)
@@ -2541,18 +2549,39 @@ void Tracking::MonocularInitializationNew()
                         matches12.push_back(make_pair(i,matches[i]));
                     }
                 }
-
                 // estimate the motion
-                float alpha = TwoViewReconstruction::FindAckermannTheta(mpCamera->toK_(), mLastFrame.mvKeysUn, mInitialFrame.mvKeysUn, matches12);
+                float theta = TwoViewReconstruction::FindAckermannTheta(mpCamera->toK_(), mLastFrameOfKeyFrame.mvKeysUn, mInitialFrame.mvKeysUn, matches12);
+                Eigen::Matrix3f Rc2c1;
+                Rc2c1 << cos(theta), 0, -sin(theta),
+                        0, 1, 0,
+                        sin(theta), 0, cos(theta);
+                Sophus::SE3f Tc2c1 = Sophus::SE3f(Rc2c1, Eigen::Vector3f::Zero());
+
+                // Tc2c1 * Tc1w
+//                Sophus::SE3f Tc2w = Tc2c1 * mLastFrameOfKeyFrame.GetPose();
+
+                T_w2init_w1last = Tc2c1 * T_w2init_w1last;
 
                 // TODO: record the motion information (translation from velocity, rotation)
+                std::cout << "----------------------\n";
+                std::cout << "theta:" << theta << std::endl;
                 std::cout << "velocity:" << mVelocity.translation().transpose() << std::endl;
-                std::cout << "lastFrame timestamp:" << mLastFrame.mTimeStamp << std::endl;
-                std::cout << "lastKeyFrame timestamp:" << mpLastKeyFrame->mTimeStamp << std::endl;
+                std::cout << "mLastFrameOfKeyFrame.mnId:" << mLastFrameOfKeyFrame.mnId << ", mLastFrameOfKeyFrame timestamp:" << mLastFrameOfKeyFrame.mTimeStamp << std::endl;
                 std::cout << "current timestamp:" << mInitialFrame.mTimeStamp << std::endl;
 
-                mLastFrame = Frame(mCurrentFrame);
+
+
+//                plotHomographyFlow(mpCamera->toK_(), Rc2c1, mLastFrameOfKeyFrame.mvKeysUn,
+//                                   mInitialFrame.mvKeysUn, matches, mInitialFrame.imgLeft, "check");
+
+//                mInitialFrame.SetPose(Tc2w); // will be changed later somehow
+//                mpAtlas->mpLostManager->addWeakEdges(mLastFrameOfKeyFrame.mnId, mInitialFrame.mnId, Tc2c1);
+
+                mLastFrameOfKeyFrame = Frame(mInitialFrame);
                 mbReadyToInitializate = true;
+
+                mvInitialFrames.clear();
+                return;
             }
         }
 
@@ -2564,13 +2593,16 @@ void Tracking::MonocularInitializationNew()
         if (((int)mCurrentFrame.mvKeys.size()<=100)||((mSensor == System::IMU_MONOCULAR)&&(mLastFrame.mTimeStamp-mInitialFrame.mTimeStamp>1.0)))
         {
             mbReadyToInitializate = false;
-
+            mpAtlas->mpLostManager->addGraphNode(mInitialFrame.mnId, mInitialFrame.GetPose(), false);
             return;
         }
 
-        std::cout << "----------------\n";
-        std::cout << "mInitialFrame stamp:" << mInitialFrame.mTimeStamp << std::endl;
-        std::cout << "mCurrentFrame stamp:" << mCurrentFrame.mTimeStamp << std::endl;
+
+//        std::cout << "----------------\n";
+//        std::cout << "mInitialFrame.Id:" << mInitialFrame.mnId <<  ", mInitialFrame stamp:" << mInitialFrame.mTimeStamp << std::endl;
+//        std::cout << "mCurrentFrame.Id:" << mCurrentFrame.mnId <<  ", mCurrentFrame stamp:" << mCurrentFrame.mTimeStamp << std::endl;
+//        std::cout << "mLastFrameOfKeyFrame.Id:" << mLastFrameOfKeyFrame.mnId <<  ", mLastFrameOfKeyFrame stamp:" << mLastFrameOfKeyFrame.mTimeStamp << std::endl;
+
         // Find correspondences
         ORBmatcher matcher(0.9,true);
         int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
@@ -2579,10 +2611,23 @@ void Tracking::MonocularInitializationNew()
         if(nmatches<100)
         {
             mbReadyToInitializate = false;
+//            if (mvInitialFrames.size() < 4)
+//                mLastFrameOfKeyFrame = mvInitialFrames.back();
+//            else
+//                mLastFrameOfKeyFrame = mvInitialFrames[mvInitialFrames.size()-4];
+
+            T_w2init_w1last = mLastFrameOfKeyFrame.GetPose() * T_w2init_w1last;
+
+//            mpAtlas->mpLostManager->addWeakEdges(mInitialFrame.mnId, mLastFrameOfKeyFrame.mnId, mLastFrameOfKeyFrame.GetPose());
+//            mpAtlas->mpLostManager->addGraphNode(mInitialFrame.mnId, mInitialFrame.GetPose(), false);
+//            Sophus::SE3f Tlw = mLastFrameOfKeyFrame.GetPose() * mInitialFrame.GetPose();
+//            mpAtlas->mpLostManager->addGraphNode(mLastFrameOfKeyFrame.mnId, Tlw, false);
+//            mLastFrameOfKeyFrame.SetPose(Tlw);
+
             return;
         }
 
-        Sophus::SE3f Tcw;
+        Sophus::SE3f Tcw = Sophus::SE3f();
         vector<bool> vbTriangulated; // Triangulated Correspondences (mvIniMatches)
         vector<bool> vbMatchesInliers;
 
@@ -2590,9 +2635,10 @@ void Tracking::MonocularInitializationNew()
         bool success = mpCamera->ReconstructWithTwoViews(mInitialFrame.mvKeysUn,mCurrentFrame.mvKeysUn,mvIniMatches,
                                                          Tcw,mvIniP3D,vbTriangulated,vbMatchesInliers);
 
-        Utils::plotMatches(mInitialFrame, mCurrentFrame, mvIniMatches);
-        
-        bool bPlotFlow = true;
+        mLastFrameOfKeyFrame = mCurrentFrame;
+        mLastFrameOfKeyFrame.SetPose(Tcw);
+
+        bool bPlotFlow = false;
         if (bPlotFlow)
         {
             std::vector<int> tempMatches = mvIniMatches;
@@ -2628,11 +2674,28 @@ void Tracking::MonocularInitializationNew()
             // Set Frame Poses
             mInitialFrame.SetPose(Sophus::SE3f());
             mCurrentFrame.SetPose(Tcw);
-
+            std::cout << Tcw.translation().transpose()  << std::endl;
             if (!mbReInitialization)
                 mbReInitialization = true;
+            else
+            {
+                mpAtlas->mpLostManager->addWeakEdges(mLastFrameOfKeyFrameReal.mnId, mInitialFrame.mnId, T_w2init_w1last);
+                T_w2init_w1last = Sophus::SE3f();
+            }
 
             CreateInitialMapMonocular();
+
+            for (Map* map: mpAtlas->GetAllMaps())
+            {
+                std::cout << "%%%%%%%%%%%%\n";
+                std::cout << "map id:" << map->GetId() << std::endl;
+                for (KeyFrame* kf: map->GetAllKeyFrames())
+                {
+                    std::cout << "kfID:" << kf->mnFrameId <<", kfTimestamp:" << kf->mTimeStamp << std::endl;
+                }
+            }
+            mpAtlas->mpLostManager->PringGraphShortInfo();
+
         }
     }
 }
@@ -2821,6 +2884,8 @@ void Tracking::CreateInitialMapMonocular()
     mCurrentFrame.SetPose(pKFcur->GetPose());
     mnLastKeyFrameId=mCurrentFrame.mnId;
     mpLastKeyFrame = pKFcur;
+    mLastFrameOfKeyFrame = Frame(mCurrentFrame);
+    mLastFrameOfKeyFrameReal = Frame(mCurrentFrame);
     //mnLastRelocFrameId = mInitialFrame.mnId;
 
     mvpLocalKeyFrames.push_back(pKFcur);
@@ -2886,7 +2951,7 @@ void Tracking::CreateMapInAtlas()
 //    if(mpReferenceKF)
 //        mpReferenceKF = static_cast<KeyFrame*>(NULL);
 //
-//    mLastFrame = Frame();
+    mLastFrame = Frame();
 
     mCurrentFrame = Frame();
     mvIniMatches.clear();
@@ -3160,7 +3225,7 @@ bool Tracking::TrackLocalMap()
             if(mCurrentFrame.mvbOutlier[i])
                 aux2++;
         }
-
+    std::cout << "mCurrentFrame points:" << mCurrentFrame.N << "," << mCurrentFrame.mvpMapPoints.size() << std::endl;
     int inliers;
     if (!mpAtlas->isImuInitialized())
         Optimizer::PoseOptimization(&mCurrentFrame);
@@ -3533,6 +3598,8 @@ void Tracking::CreateNewKeyFrame()
 
     mnLastKeyFrameId = mCurrentFrame.mnId;
     mpLastKeyFrame = pKF;
+    mLastFrameOfKeyFrame = Frame(mCurrentFrame);
+    mLastFrameOfKeyFrameReal = Frame(mCurrentFrame);
 }
 
 void Tracking::SearchLocalPoints()
@@ -4024,6 +4091,7 @@ void Tracking::Reset(bool bLocMap)
     mLastFrame = Frame();
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+
     mvIniMatches.clear();
 
     if(mpViewer)

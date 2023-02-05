@@ -25,7 +25,7 @@
 
 #include<thread>
 
-#include "Lost.h"
+//#include "Lost.h"
 #include <ceres/ceres.h>
 #include <ceres/autodiff_cost_function.h>
 
@@ -988,7 +988,8 @@ namespace ORB_SLAM3
     // newly added
     float TwoViewReconstruction::FindAckermannTheta(const Eigen::Matrix3f &K, const vector <cv::KeyPoint> &vKeys1,
                                                     const vector <cv::KeyPoint> &vKeys2,
-                                                    std::vector<std::pair<int, int>> vMatches12) {
+                                                    std::vector<std::pair<int, int>> vMatches12) 
+    {
         Eigen::Matrix3f K_inv = K.inverse();
 
         // compute the model
@@ -997,7 +998,7 @@ namespace ORB_SLAM3
         {   
 
             const cv::KeyPoint &kp1 = vKeys1[vMatches12[i].first];
-            const cv::KeyPoint &kp2 = vKeys1[vMatches12[i].second];
+            const cv::KeyPoint &kp2 = vKeys2[vMatches12[i].second];
 
             Eigen::Vector3f bv1(kp1.pt.x, kp1.pt.y, 1);
             Eigen::Vector3f bv2(kp2.pt.x, kp2.pt.y, 1);
@@ -1011,11 +1012,12 @@ namespace ORB_SLAM3
             results.emplace_back(theta);
 
         }
-        sort(results.begin(), results.end());
-        for (int i = 0; i < results.size(); i++)
-        {
-            std::cout << results[i] << std::endl;
-        }
+//        std::cout << "----------------\n";
+        sort(results.begin(), results.end()) ;
+//        for (double theta: results)
+//        {
+//            std::cout << theta << std::endl;
+//        }
         // TODO: plot a theta histogram here
         double best_theta = results[results.size() / 2];
 
@@ -1038,7 +1040,7 @@ namespace ORB_SLAM3
         Eigen::Matrix3f F = mK.inverse().transpose() * E * mK.inverse();
 
         int nInlier = 0;
-        vbMatchesInliers.reserve(mvMatches12.size());
+        vbMatchesInliers.resize(mvMatches12.size());
         for (int i = 0; i < mvMatches12.size(); i++)
         {
             const cv::KeyPoint &kp1 = mvKeys1[mvMatches12[i].first];
@@ -1072,65 +1074,71 @@ namespace ORB_SLAM3
                                                       const std::vector<int> &vMatches, Sophus::SE3f &T21,
                                                       std::vector<cv::Point3f> &vP3D, std::vector<bool> &vbTriangulated,
                                                       std::vector<bool> &vbMatchesInlier)
-   {
-       mvKeys1.clear();
-       mvKeys2.clear();
+    {
+        mvKeys1.clear();
+        mvKeys2.clear();
 
-       mvKeys1 = vKeys1;
-       mvKeys2 = vKeys2;
+        mvKeys1 = vKeys1;
+        mvKeys2 = vKeys2;
 
-       mvMatches12.clear();
-       mvMatches12.reserve(mvKeys2.size());
-       mvbMatched1.resize(mvKeys1.size());
-       for(size_t i=0, iend=vMatches.size();i<iend; i++)
-       {
-           if(vMatches[i]>=0)
-           {
-               mvMatches12.push_back(make_pair(i,vMatches[i]));
-               mvbMatched1[i]=true;
-           }
-           else
-               mvbMatched1[i]=false;
-       }
+        mvMatches12.clear();
+        mvMatches12.reserve(mvKeys2.size());
+        mvbMatched1.resize(mvKeys1.size());
+        for(size_t i=0, iend=vMatches.size();i<iend; i++)
+        {
+            if(vMatches[i]>=0)
+            {
+                const cv::KeyPoint &kp1 = mvKeys1[i];
+                const cv::KeyPoint &kp2 = mvKeys2[vMatches[i]];;
+                mvMatches12.push_back(make_pair(i,vMatches[i]));
+                mvbMatched1[i]=true;
+            }
+            else
+                mvbMatched1[i]=false;
+        }
 
-       // find model
-       float theta = FindAckermannTheta(mK, mvKeys1, mvKeys2, mvMatches12);
+        // find model
+        float theta = FindAckermannTheta(mK, mvKeys1, mvKeys2, mvMatches12);
 
-       // check inliers
-       std::vector<bool> bModelInliers;
-       int nInlier = CheckAckermannTheta(theta, bModelInliers, mSigma);
-       vbMatchesInlier = vector<bool>(vKeys1.size(),false);
-       assert(mvMatches12.size() == bModelInliers.size());
-       for(size_t i=0; i<mvMatches12.size(); i++)
-       {
-           if (bModelInliers[i])
-               vbMatchesInlier[mvMatches12[i].first] = true;
-       }
+        // check inliers
+        std::vector<bool> bModelInliers;
+        int nInlier = CheckAckermannTheta(theta, bModelInliers, mSigma);
+        vbMatchesInlier = vector<bool>(vKeys1.size(),false);
+        assert(mvMatches12.size() == bModelInliers.size());
+        for(size_t i=0; i<mvMatches12.size(); i++)
+        {
+            if (bModelInliers[i])
+                vbMatchesInlier[mvMatches12[i].first] = true;
+        }
 
-       // model
-       Eigen::Matrix3f Rc2c1;
-       Rc2c1 << cos(theta), 0, -sin(theta),
-               0, 1, 0,
-               sin(theta), 0, cos(theta);
-       Eigen::Vector3f tc2c1(sin(theta /2), 0, -cos(theta / 2));
+        // model
+        Eigen::Matrix3f Rc2c1;
+        Rc2c1 << cos(theta), 0, -sin(theta),
+                0, 1, 0,
+                sin(theta), 0, cos(theta);
+        Eigen::Vector3f tc2c1(sin(theta /2), 0, -cos(theta / 2));
 
-       // Triangulate points
-       float parallax;
-       int nGood = CheckRT(Rc2c1, tc2c1, mvKeys1, mvKeys2, mvMatches12,
-                           bModelInliers, mK, vP3D, 4*mSigma2, vbTriangulated, parallax);
+        // Triangulate points
+        float parallax;
+        int nGood = CheckRT(Rc2c1, tc2c1, mvKeys1, mvKeys2, mvMatches12,
+                            bModelInliers, mK, vP3D, 4*mSigma2, vbTriangulated, parallax);
 
-       std::cout << "best_theta:" << theta << std::endl;
-       std::cout << "matches:" << mvMatches12.size() << std::endl;
-       std::cout << "model Inliers:" << nInlier << std::endl;
-       std::cout << "nGood:" << nGood << std::endl;
-       std::cout << "vP3D:" << vP3D.size() << std::endl;
-       std::cout << "parallax:" << parallax << std::endl;
+//        std::cout << "best_theta:" << theta << std::endl;
+//        std::cout << "matches:" << mvMatches12.size() << std::endl;
+//        std::cout << "model Inliers:" << nInlier << std::endl;
+//        std::cout << "nGood:" << nGood << std::endl;
+//        std::cout << "vP3D:" << vP3D.size() << std::endl;
+//        std::cout << "parallax:" << parallax << std::endl;
 
-       if (parallax > 0.65)
-       {
-           T21 = Sophus::SE3f(Rc2c1, tc2c1);
-           return true;
-       }
-       else return false;
-   }
+        if (parallax > 0.65)
+        {
+            T21 = Sophus::SE3f(Rc2c1, tc2c1);
+            return true;
+        }
+        else
+        {
+            T21 = Sophus::SE3f(Rc2c1, Eigen::Vector3f::Zero());
+            return false;
+        }
+    }
 } //namespace ORB_SLAM
