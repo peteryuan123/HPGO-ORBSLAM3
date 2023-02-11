@@ -381,11 +381,11 @@ public:
     //------------- NEW -------------
 public:
     Frame mLastFrameOfKeyFrame;
-    Frame mLastFrameOfKeyFrameReal;
+    int mnLastMapKeyFrameId; // Frame ID, not KeyFrame id
+//    Frame mLastFrameOfKeyFrameReal;
 
     std::vector<Frame> mvInitialFrames;
 
-    std::vector<LostInfo> mvLostInfos;
     bool mbReInitialization; // false for the first initialization, true for reinitialization
 
     Sophus::SE3f T_w2init_w1last;

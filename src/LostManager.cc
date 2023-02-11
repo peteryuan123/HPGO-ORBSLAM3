@@ -23,6 +23,21 @@ namespace ORB_SLAM3
         mGraphNodes[id] = GraphNode(id, fixed, Tcw);
     }
 
+    void LostManager::popLastWeakEdge(int& id0, int& id1, Sophus::SE3f& Tc1c0)
+    {
+        id0 = std::move(mWeakEdges.back().mId0);
+        id1 = std::move(mWeakEdges.back().mId1);
+        Tc1c0 = std::move(mWeakEdges.back().mSIM3_Tc1c0);
+        mWeakEdges.pop_back();
+    }
+
+    void LostManager::clearGraph()
+    {
+        mGraphNodes.clear();
+        mWeakEdges.clear();
+        mNormalEdges.clear();
+    }
+
     void LostManager::optimize()
     {
         ceres::Problem problem;
@@ -101,6 +116,7 @@ namespace ORB_SLAM3
         options.max_num_iterations = 100;
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
+        std::cout << summary.BriefReport() << std::endl;
         std::cout << "-----------------------\n";
         for (auto it = mGraphNodes.begin(); it != mGraphNodes.end(); it++)
         {
@@ -109,6 +125,96 @@ namespace ORB_SLAM3
         }
         std::cout << "-----------------------\n";
 
+    }
+
+    void LostManager::optimizeWeakAsNormal()
+    {
+        ceres::Problem problem;
+        ceres::Solver::Options options;
+
+        // add Normal Edge
+        for (const NormalEdge& nEdge: mNormalEdges)
+        {
+            if (mGraphNodes.find(nEdge.mId0) == mGraphNodes.end())
+            {
+                std::cout << "no Node id:" << nEdge.mId0 << " in the graph" << std::endl;
+                continue;
+            }
+            if (mGraphNodes.find(nEdge.mId1) == mGraphNodes.end())
+            {
+                std::cout << "no Node id:" << nEdge.mId1<< " in the graph" << std::endl;
+                continue;
+            }
+
+            if (mGraphNodes[nEdge.mId0].mfixed)
+            {
+                ceres::CostFunction* costFunction =
+                        new ceres::AutoDiffCostFunction<Sim3FunctorFixNode0, 7, 7>(
+                                new Sim3FunctorFixNode0(mGraphNodes[nEdge.mId0], nEdge));
+
+                problem.AddResidualBlock(costFunction, nullptr,
+                                         mGraphNodes[nEdge.mId1].msim3_Tcw_opt.data());
+            }
+            else if (mGraphNodes[nEdge.mId1].mfixed)
+            {
+                ceres::CostFunction* costFunction =
+                        new ceres::AutoDiffCostFunction<Sim3FunctorFixNode1, 7, 7>(
+                                new Sim3FunctorFixNode1(mGraphNodes[nEdge.mId1], nEdge));
+
+                problem.AddResidualBlock(costFunction, nullptr,
+                                         mGraphNodes[nEdge.mId0].msim3_Tcw_opt.data());
+            }else
+            {
+                ceres::CostFunction* costFunction =
+                        new ceres::AutoDiffCostFunction<Sim3Functor, 7, 7, 7>(new Sim3Functor(nEdge));
+
+                // consider huber loss
+                problem.AddResidualBlock(costFunction, nullptr,
+                                         mGraphNodes[nEdge.mId0].msim3_Tcw_opt.data(),
+                                         mGraphNodes[nEdge.mId1].msim3_Tcw_opt.data());
+            }
+        }
+
+        // add Weak Edge
+        for (const WeakEdge& wEdge: mWeakEdges)
+        {
+            if (mGraphNodes.find(wEdge.mId0) == mGraphNodes.end())
+            {
+                std::cout << "no Node id:" << wEdge.mId0 << " in the graph" << std::endl;
+                continue;
+            }
+            if (mGraphNodes.find(wEdge.mId1) == mGraphNodes.end())
+            {
+                std::cout << "no Node id:" << wEdge.mId1<< " in the graph" << std::endl;
+                continue;
+            }
+            assert(!mGraphNodes[wEdge.mId0].mfixed);
+            assert(!mGraphNodes[wEdge.mId1].mfixed);
+
+            NormalEdge nEdge(wEdge.mId0, wEdge.mId1, wEdge.mSIM3_Tc1c0, 1);
+
+            ceres::CostFunction* costFunction =
+                    new ceres::AutoDiffCostFunction<Sim3Functor, 7, 7, 7>(new Sim3Functor(nEdge));
+
+            // consider huber loss
+            problem.AddResidualBlock(costFunction, nullptr,
+                                     mGraphNodes[nEdge.mId0].msim3_Tcw_opt.data(),
+                                     mGraphNodes[nEdge.mId1].msim3_Tcw_opt.data());
+        }
+
+        options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
+        options.minimizer_progress_to_stdout = true;
+        options.max_num_iterations = 100;
+        ceres::Solver::Summary summary;
+        ceres::Solve(options, &problem, &summary);
+        std::cout << summary.BriefReport() << std::endl;
+        std::cout << "-----------------------\n";
+        for (auto it = mGraphNodes.begin(); it != mGraphNodes.end(); it++)
+        {
+            it->second.update();
+            std::cout << Sim3Exp(it->second.msim3_Tcw_opt).transpose() << std::endl;
+        }
+        std::cout << "-----------------------\n";
     }
 
     void LostManager::PrintGraphInfo()
@@ -172,7 +278,6 @@ namespace ORB_SLAM3
         }
 
     }
-
 
     void LostManager::PringGraphShortInfo()
     {

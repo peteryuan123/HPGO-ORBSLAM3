@@ -2134,7 +2134,8 @@ void LoopClosing::MergeLocal3()
     mpLocalMapper->EmptyQueue();
 
     std::cout << "************************************\n";
-
+    // build graph optimization
+    mpCurrentKF->UpdateConnections();
     vector<Map*> allMaps = mpAtlas->GetAllMaps();
     for (Map* curMap: allMaps)
     {
@@ -2150,16 +2151,16 @@ void LoopClosing::MergeLocal3()
             if (!(mpAtlas->mpLostManager->findNode(curKf->mnFrameId)))
                 mpAtlas->mpLostManager->addGraphNode(curKf->mnFrameId, curKf->GetPose(), false);
 
-            vector<KeyFrame*> covisibleKfs = curKf->GetBestCovisibilityKeyFrames(2); // adjust it
-            if (covisibleKfs.empty())
-                continue;
-            for (KeyFrame* covKf: covisibleKfs)
-            {
-                if (!(mpAtlas->mpLostManager->findNode(covKf->mnFrameId)))
-                    mpAtlas->mpLostManager->addGraphNode(covKf->mnFrameId, covKf->GetPose(), false);
-                Sophus::SE3f Tc1c0 = covKf->GetPose() * curKf->GetPose().inverse();
-                mpAtlas->mpLostManager->addNormalEdges(curKf->mnFrameId, covKf->mnFrameId, Tc1c0, 1.0);
-            }
+//            vector<KeyFrame*> covisibleKfs = curKf->GetBestCovisibilityKeyFrames(2); // adjust it
+//            if (covisibleKfs.empty())
+//                continue;
+//            for (KeyFrame* covKf: covisibleKfs)
+//            {
+//                if (!(mpAtlas->mpLostManager->findNode(covKf->mnFrameId)))
+//                    mpAtlas->mpLostManager->addGraphNode(covKf->mnFrameId, covKf->GetPose(), false);
+//                Sophus::SE3f Tc1c0 = covKf->GetPose() * curKf->GetPose().inverse();
+//                mpAtlas->mpLostManager->addNormalEdges(curKf->mnFrameId, covKf->mnFrameId, Tc1c0, 1.0);
+//            }
 
             if (lastKf != nullptr)
             {
@@ -2170,7 +2171,7 @@ void LoopClosing::MergeLocal3()
         }
     }
 
-
+    mpAtlas->mpLostManager->optimizeWeakAsNormal();
 
     // calculate sim3 transformation from current to merged and set current as fixed
     Sophus::SE3d Tmw = mpMergeMatchedKF->GetPose().cast<double>();
@@ -2178,8 +2179,8 @@ void LoopClosing::MergeLocal3()
     Sophus::SE3f Tlw(mg2oMergeSlw.rotation().cast<float>(), mg2oMergeSlw.translation().cast<float>());
     g2o::Sim3 g2oSml = g2oSmw2 * mg2oMergeSlw.inverse();
     Sophus::SE3f Tml(g2oSml.rotation().cast<float>(), g2oSml.translation().cast<float>());
-    mpAtlas->mpLostManager->addNormalEdges(0, mpCurrentKF->mnFrameId, Tlw, mg2oMergeSlw.scale());
-
+//    mpAtlas->mpLostManager->addNormalEdges(0, mpCurrentKF->mnFrameId, Tlw, mg2oMergeSlw.scale());
+    mpAtlas->mpLostManager->addNormalEdges(mpCurrentKF->mnFrameId, mpMergeMatchedKF->mnFrameId, Tml, g2oSml.scale());
 //    mpAtlas->mpLostManager->addNormalEdges(mpCurrentKF->mnFrameId, mpMergeMatchedKF->mnFrameId, Tml, g2oSml.scale());
 //    if (!mpAtlas->mpLostManager->setFixed(mpCurrentKF->mnFrameId))
     if (!mpAtlas->mpLostManager->setFixed(mpMergeMatchedKF->mnFrameId))
@@ -2193,11 +2194,40 @@ void LoopClosing::MergeLocal3()
 //    exit(0);
     // --------------------------------optimize done --------------------------
 
+    // prepare for fusing point
+    KeyFrameAndPose vCorrectedSim3;
+    vector<KeyFrame*> vpCurrentKfCovisibleFrames = mpCurrentKF->GetBestCovisibilityKeyFrames(8);
+//    std::cout << "current covisible frame Num:" << vpCurrentKfCovisibleFrames.size();
+    vpCurrentKfCovisibleFrames.emplace_back(mpCurrentKF);
+    for (KeyFrame* pKFi: vpCurrentKfCovisibleFrames)
+    {
+        if (mpAtlas->mpLostManager->findNode(pKFi->mnFrameId))
+            vCorrectedSim3[pKFi] = mpAtlas->mpLostManager->getSimPose(pKFi->mnFrameId);
+        else
+        {
+            std::cout << "no covisible information of KF " <<  pKFi->mnFrameId << std::endl;
+            continue;
+        }
+    }
+
+    // prepare for fusing points
+    vector<KeyFrame*> vpMergeKfCovisibleFrames = mpMergeMatchedKF->GetBestCovisibilityKeyFrames(15);
+    vpMergeKfCovisibleFrames.emplace_back(mpMergeMatchedKF);
+    set<MapPoint*> spMapPointMerge;
+    for(KeyFrame* pKFi : vpMergeKfCovisibleFrames)
+    {
+        set<MapPoint*> vpMPs = pKFi->GetMapPoints();
+        spMapPointMerge.insert(vpMPs.begin(),vpMPs.end());
+    }
+    vector<MapPoint*> vpCheckFuseMapPoint;
+    vpCheckFuseMapPoint.reserve(spMapPointMerge.size());
+    std::copy(spMapPointMerge.begin(), spMapPointMerge.end(), std::back_inserter(vpCheckFuseMapPoint));
+//    std::cout << "merge covisible frame Num:" << vpMergeKfCovisibleFrames.size();
+
 
     // ------------------ maintain keyframe and points-------------
     Map* pMergeMap = mpMergeMatchedKF->GetMap();
     Map* pCurrentMap = mpCurrentKF->GetMap();
-
     {
         unique_lock<mutex> currentLock(pCurrentMap->mMutexMapUpdate); // We update the current map with the Merge information
         unique_lock<mutex> mergeLock(pMergeMap->mMutexMapUpdate); // We remove the Kfs and MPs in the merged area from the old map
@@ -2213,6 +2243,7 @@ void LoopClosing::MergeLocal3()
                     continue;
 
                 KeyFrame* pKf = pMPi->GetReferenceKeyFrame();
+//                pMPi->
                 Sophus::SE3f Tcw1 = pKf->GetPose();
 
                 g2o::Sim3 Scw2;
@@ -2220,7 +2251,7 @@ void LoopClosing::MergeLocal3()
                     Scw2 = mpAtlas->mpLostManager->getSimPose(pKf->mnFrameId);
                 else
                 {
-                    std::cout << "kf " << pKf->mnFrameId << " not optimized, error(point)!\n";
+//                    std::cout << "kf " << pKf->mnFrameId << " not optimized, error(point)!\n";
                     continue;
                 }
                 Eigen::Vector3d P3Dw1 = pMPi->GetWorldPos().cast<double>();
@@ -2263,16 +2294,10 @@ void LoopClosing::MergeLocal3()
                 mpAtlas->SetMapBad(curMap);
         }
 
-
-
         mpAtlas->ChangeMap(pMergeMap);
-
-        std::cout << "changed map" << std::endl;
-
-        //TODO: maintain map, consider updating essential graph
     }
 
-    mpCurrentKF->UpdateConnections();
+    // rebuild essential graph
     pCurrentMap->GetOriginKF()->SetFirstConnection(false);
     KeyFrame *pNewChild = mpCurrentKF->GetParent(); // Old parent, it will be the new child of this KF
     KeyFrame *pNewParent = mpCurrentKF; // Old child, now it will be the parent of its own parent(we need eliminate this KF from children list in its old parent)
@@ -2286,11 +2311,31 @@ void LoopClosing::MergeLocal3()
 
         pNewParent = pNewChild;
         pNewChild = pOldParent;
-        if (pNewChild)
-            std::cout << "newChildId:" << pNewChild->mnFrameId << std::endl;
+//        if (pNewChild)
+//            std::cout << "newChildId:" << pNewChild->mnFrameId << std::endl;
+    }
+    mpMergeMatchedKF->UpdateConnections();
+
+    // fuse points
+    SearchAndFuse(vCorrectedSim3, vpCheckFuseMapPoint);
+
+    // update connections
+    for(KeyFrame* pKFi : vpCurrentKfCovisibleFrames)
+    {
+        if(!pKFi || pKFi->isBad())
+            continue;
+
+        pKFi->UpdateConnections();
+    }
+    for(KeyFrame* pKFi : vpMergeKfCovisibleFrames)
+    {
+        if(!pKFi || pKFi->isBad())
+            continue;
+
+        pKFi->UpdateConnections();
     }
 
-    mpMergeMatchedKF->UpdateConnections();
+
     pCurrentMap->IncreaseChangeIndex();
     pMergeMap->IncreaseChangeIndex();
     mpLocalMapper->Release();
@@ -2354,8 +2399,8 @@ void LoopClosing::SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vector
 
     int total_replaces = 0;
 
-    //cout << "[FUSE]: Initially there are " << vpMapPoints.size() << " MPs" << endl;
-    //cout << "FUSE: Intially there are " << CorrectedPosesMap.size() << " KFs" << endl;
+    cout << "[FUSE]: Initially there are " << vpMapPoints.size() << " MPs" << endl;
+    cout << "FUSE: Intially there are " << CorrectedPosesMap.size() << " KFs" << endl;
     for(KeyFrameAndPose::const_iterator mit=CorrectedPosesMap.begin(), mend=CorrectedPosesMap.end(); mit!=mend;mit++)
     {
         int num_replaces = 0;
@@ -2386,7 +2431,7 @@ void LoopClosing::SearchAndFuse(const KeyFrameAndPose &CorrectedPosesMap, vector
 
         total_replaces += num_replaces;
     }
-    //cout << "[FUSE]: " << total_replaces << " MPs had been fused" << endl;
+    cout << "[FUSE]: " << total_replaces << " MPs had been fused" << endl;
 }
 
 

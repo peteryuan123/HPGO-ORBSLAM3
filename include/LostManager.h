@@ -303,14 +303,14 @@ namespace ORB_SLAM3
     // Functor
 
 
-    
+
     class LostManager
     {
     protected:
         std::unordered_map<int, GraphNode> mGraphNodes;
         std::vector<WeakEdge> mWeakEdges;
         std::vector<NormalEdge> mNormalEdges;
-        
+
     public:
         LostManager() = default;
         ~LostManager() = default;
@@ -321,7 +321,13 @@ namespace ORB_SLAM3
 
         void addGraphNode(int id, const Sophus::SE3f& Tcw, bool fixed);
 
+        void popLastWeakEdge(int& id0, int& id1, Sophus::SE3f& Tc1c0);
+
+        void clearGraph();
+
         void optimize();
+
+        void optimizeWeakAsNormal();
 
         void PrintGraphInfo();
 
