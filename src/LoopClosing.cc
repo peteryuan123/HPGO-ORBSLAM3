@@ -256,7 +256,7 @@ void LoopClosing::Run()
                     }
 
                 }
-
+                mbLoopDetected = false;
                 if(mbLoopDetected)
                 {
                     bool bGoodLoop = true;
@@ -2189,8 +2189,9 @@ void LoopClosing::MergeLocal3()
     mpAtlas->mpLostManager->PringGraphShortInfo();
 
     mpAtlas->mpLostManager->optimize();
-
+//    mpAtlas->mpLostManager->optimizeWeakAsNormal();
     mpAtlas->mpLostManager->PrintNodes();
+
 //    exit(0);
     // --------------------------------optimize done --------------------------
 
@@ -2317,7 +2318,7 @@ void LoopClosing::MergeLocal3()
     mpMergeMatchedKF->UpdateConnections();
 
     // fuse points
-    SearchAndFuse(vCorrectedSim3, vpCheckFuseMapPoint);
+   SearchAndFuse(vCorrectedSim3, vpCheckFuseMapPoint);
 
     // update connections
     for(KeyFrame* pKFi : vpCurrentKfCovisibleFrames)
@@ -2335,7 +2336,7 @@ void LoopClosing::MergeLocal3()
         pKFi->UpdateConnections();
     }
 
-
+    mpAtlas->mpLostManager->clearGraph();
     pCurrentMap->IncreaseChangeIndex();
     pMergeMap->IncreaseChangeIndex();
     mpLocalMapper->Release();

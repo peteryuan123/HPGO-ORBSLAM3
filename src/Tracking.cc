@@ -1827,6 +1827,27 @@ void plotHomographyFlow(const Eigen::Matrix3f& K, const Eigen::Matrix3f& R,
     Utils::plotFlow(image, vf2Feature, vf1Feature_in_f2, windowName);
     cv::waitKey(0);
 }
+double medianDisparity(const vector<cv::KeyPoint> &keys1, const vector<cv::KeyPoint>& keys2,
+                       const vector<int>& matches)
+{
+    vector<double> results;
+    for(size_t i=0, iend=matches.size(); i<iend;i++)
+    {
+        if(matches[i]>=0)
+        {
+            const cv::KeyPoint& key1 = keys1[i];
+            const cv::KeyPoint& key2 = keys2[matches[i]];
+
+//            double disparity = sqrt((key1.pt.x - key2.pt.x) * (key1.pt.x - key2.pt.x) +
+//                               (key1.pt.y - key2.pt.y) * (key1.pt.y - key2.pt.y));
+            double disparity = abs(key1.pt.x - key2.pt.x);
+            results.emplace_back(disparity);
+        }
+    }
+
+    return results[results.size()/2];
+}
+
 //---------------------------newly added---------------------------
 
 void Tracking::Track()
@@ -2610,8 +2631,10 @@ void Tracking::MonocularInitializationNew()
         ORBmatcher matcher(0.9,true);
         int nmatches = matcher.SearchForInitialization(mInitialFrame,mCurrentFrame,mvbPrevMatched,mvIniMatches,100);
 
+        double median_disparity = medianDisparity(mInitialFrame.mvKeysUn, mCurrentFrame.mvKeysUn, mvIniMatches);
+
         // Check if there are enough correspondences
-        if(nmatches<200)
+        if(nmatches<150 || median_disparity > 80)
         {
             mbReadyToInitializate = false;
 //            if (mvInitialFrames.size() < 4)
@@ -2676,6 +2699,19 @@ void Tracking::MonocularInitializationNew()
                                    mCurrentFrame.mvKeysUn, mvIniMatches, mCurrentFrame.imgLeft, "one point method(3D points)");
 
             // Set Frame Poses
+//            Sophus::SE3f initPose = mLastMapKeyFramePose.GetPose();
+//            mInitialFrame.SetPose(initPose);
+//            mCurrentFrame.SetPose(Tcw * initPose);
+//            for(size_t i=0, iend=mvIniMatches.size(); i<iend;i++)
+//            {
+//                if(mvIniMatches[i]>=0 && !vbTriangulated[i])
+//                {
+//                    Eigen::Vector3f pt(mvIniP3D[i].x, mvIniP3D[i].y, mvIniP3D[i].z);
+//                    pt = mInitialFrame.GetPose().rotationMatrix() * pt + mInitialFrame.GetPose().translation();
+//                    mvIniP3D[i] = cv::Point3f(pt[0], pt[1], pt[2]);
+//                }
+//            }
+
             mInitialFrame.SetPose(Sophus::SE3f());
             mCurrentFrame.SetPose(Tcw);
 //            std::cout << Tcw.translation().transpose()  << std::endl;
@@ -2685,7 +2721,7 @@ void Tracking::MonocularInitializationNew()
             {
 //                mpAtlas->mpLostManager->addNormalEdges(mnLastMapKeyFrameId, mInitialFrame.mnId, T_w2init_w1last, 1);
                 std::cout << "add weak edge between " << mnLastMapKeyFrameId << ", " << mInitialFrame.mnId << std::endl;
-                mpAtlas->mpLostManager->addWeakEdges(mnLastMapKeyFrameId, mInitialFrame.mnId, T_w2init_w1last);
+                mpAtlas->mpLostManager->addWeakEdges(mnLastMapKeyFrameId , mInitialFrame.mnId, T_w2init_w1last);
                 T_w2init_w1last = Sophus::SE3f();
             }
 
@@ -2882,7 +2918,9 @@ void Tracking::CreateInitialMapMonocular()
     mnLastKeyFrameId=mCurrentFrame.mnId;
     mpLastKeyFrame = pKFcur;
     mLastFrameOfKeyFrame = Frame(mCurrentFrame);
+
     mnLastMapKeyFrameId = mCurrentFrame.mnId;
+    mLastMapKeyFramePose = mCurrentFrame.GetPose();
     //mnLastRelocFrameId = mInitialFrame.mnId;
 
     mvpLocalKeyFrames.push_back(pKFcur);
@@ -3597,6 +3635,8 @@ void Tracking::CreateNewKeyFrame()
     mpLastKeyFrame = pKF;
     mLastFrameOfKeyFrame = Frame(mCurrentFrame);
     mnLastMapKeyFrameId = mCurrentFrame.mnId;
+    mLastMapKeyFramePose = mCurrentFrame.GetPose();
+
 }
 
 void Tracking::SearchLocalPoints()
@@ -4138,7 +4178,6 @@ void Tracking::ResetActiveMap(bool bLocMap)
         mLastFrameOfKeyFrame.mnId = lastKF->mnFrameId;
         std::cout << "back frameID:" << lastKF->mnFrameId << std::endl;
         std::cout << pMap->GetAllKeyFrames().size() << std::endl;
-
     }
 
 //    std::cout << "this two num must be equal:" << lastInitialFrameID << "， " << mInitialFrame.mnId << std::endl;

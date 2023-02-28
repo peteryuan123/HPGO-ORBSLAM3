@@ -381,7 +381,9 @@ public:
     //------------- NEW -------------
 public:
     Frame mLastFrameOfKeyFrame;
+
     int mnLastMapKeyFrameId; // Frame ID, not KeyFrame id
+    Sophus::SE3f mLastMapKeyFramePose;
 //    Frame mLastFrameOfKeyFrameReal;
 
     std::vector<Frame> mvInitialFrames;
