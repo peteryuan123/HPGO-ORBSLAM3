@@ -1,5 +1,9 @@
-# ORB-SLAM3
+# HPGO-based ORB-SLAM3
 
+
+https://github.com/peteryuan123/HPGO-ORBSLAM3/assets/33962726/27aaa15c-f249-4f23-8636-0ee3f5482ecb
+
+------------------------------
 ### V1.0, December 22th, 2021
 **Authors:** Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, [José M. M. Montiel](http://webdiis.unizar.es/~josemari/), [Juan D. Tardos](http://webdiis.unizar.es/~jdtardos/).
 
