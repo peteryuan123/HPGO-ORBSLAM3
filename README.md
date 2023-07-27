@@ -3,6 +3,8 @@
 
 https://github.com/peteryuan123/HPGO-ORBSLAM3/assets/33962726/27aaa15c-f249-4f23-8636-0ee3f5482ecb
 
+Runze Yuan, Ran Cheng, Lige Liu, Tao Sun, Laurent Kneip, **Scale jump-aware pose graph relaxation for monocular SLAM with re-initializations**, **[PDF](https://arxiv.org/pdf/2307.12326.pdf)**.
+
 ------------------------------
 ### V1.0, December 22th, 2021
 **Authors:** Carlos Campos, Richard Elvira, Juan J. Gómez Rodríguez, [José M. M. Montiel](http://webdiis.unizar.es/~josemari/), [Juan D. Tardos](http://webdiis.unizar.es/~jdtardos/).
